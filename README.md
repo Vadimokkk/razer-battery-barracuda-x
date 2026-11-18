@@ -2,7 +2,7 @@
 
 **Индикатор заряда Razer Barracuda X для Windows.** Приложение работает в трее и не требует Razer Synapse.
 
-[Скачать готовый архив](https://github.com/Vadimokkk/razer-battery-barracuda-x/releases/latest/download/RazerBattery-Windows.zip) · [Скачать exe](https://github.com/Vadimokkk/razer-battery-barracuda-x/releases/latest/download/RazerBattery.exe)
+[Скачать готовый архив](https://github.com/Vadimokkk/razer-battery-barracuda-x/releases/latest/download/RazerBattery-Windows.zip) · [Скачать exe](https://github.com/Vadimokkk/razer-battery-barracuda-x/releases/latest/download/RazerBattery-1.3.1.exe)
 
 ## Возможности
 
