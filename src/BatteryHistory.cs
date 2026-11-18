@@ -13,6 +13,7 @@ namespace RazerBatteryApp
         public DateTime TimeUtc;
         public int Percent;
         public bool Exact;
+        public bool Charging;
         public string Source;
     }
 
@@ -31,16 +32,18 @@ namespace RazerBatteryApp
             Load();
         }
 
-        public void Add(int percent, bool exact, DateTime timeUtc)
+        public void Add(int percent, bool exact, bool charging, string source, DateTime timeUtc)
         {
             if (percent < 0 || percent > 100) return;
             if (timeUtc.Kind != DateTimeKind.Utc) timeUtc = timeUtc.ToUniversalTime();
+            if (String.IsNullOrEmpty(source)) source = "USB-донгл";
             lock (gate)
             {
                 if (samples.Count > 0)
                 {
                     BatterySample last = samples[samples.Count - 1];
-                    if (last.Percent == percent && last.Exact == exact && timeUtc - last.TimeUtc < TimeSpan.FromMinutes(5)) return;
+                    if (last.Percent == percent && last.Exact == exact && last.Charging == charging && last.Source == source &&
+                        timeUtc - last.TimeUtc < TimeSpan.FromMinutes(5)) return;
                 }
 
                 BatterySample sample = new BatterySample
@@ -48,7 +51,8 @@ namespace RazerBatteryApp
                     TimeUtc = timeUtc,
                     Percent = percent,
                     Exact = exact,
-                    Source = exact ? "Bluetooth" : "Донгл 2,4 ГГц"
+                    Charging = charging,
+                    Source = source
                 };
                 samples.Add(sample);
                 try
@@ -85,13 +89,15 @@ namespace RazerBatteryApp
                             string[] parts = row.Split(',');
                             long ticks;
                             int percent;
-                            if (parts.Length != 3 || !Int64.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out ticks) ||
+                            if ((parts.Length != 3 && parts.Length != 5) || !Int64.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out ticks) ||
                                 !Int32.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out percent) || percent < 0 || percent > 100) continue;
                             DateTime time;
                             try { time = new DateTime(ticks, DateTimeKind.Utc); }
                             catch { continue; }
                             bool exact = parts[2] == "1";
-                            samples.Add(new BatterySample { TimeUtc = time, Percent = percent, Exact = exact, Source = exact ? "Bluetooth" : "Донгл 2,4 ГГц" });
+                            bool charging = parts.Length == 5 && parts[3] == "1";
+                            string source = parts.Length == 5 && !String.IsNullOrEmpty(parts[4]) ? parts[4] : exact ? "Bluetooth" : "USB-донгл";
+                            samples.Add(new BatterySample { TimeUtc = time, Percent = percent, Exact = exact, Charging = charging, Source = source });
                         }
                     }
                     if (samples.Count > 0 && samples[0].TimeUtc < DateTime.UtcNow.AddDays(-RetentionDays)) Trim(DateTime.UtcNow);
@@ -118,7 +124,8 @@ namespace RazerBatteryApp
         static string Format(BatterySample sample)
         {
             return sample.TimeUtc.Ticks.ToString(CultureInfo.InvariantCulture) + "," +
-                sample.Percent.ToString(CultureInfo.InvariantCulture) + "," + (sample.Exact ? "1" : "0");
+                sample.Percent.ToString(CultureInfo.InvariantCulture) + "," + (sample.Exact ? "1" : "0") + "," +
+                (sample.Charging ? "1" : "0") + "," + (sample.Source ?? "USB-донгл");
         }
     }
 

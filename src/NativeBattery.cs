@@ -16,7 +16,9 @@ namespace RazerBarracudaBattery
         public string State;
         public string Message;
         public int Percent;
+        public bool Exact;
         public bool Charging;
+        public bool ChargingKnown;
         public int Millivolts;
         public int ProductId;
     }
@@ -36,6 +38,8 @@ namespace RazerBarracudaBattery
         static readonly int[] Curve = { 3300, 3680, 3750, 3790, 3830, 3870, 3910, 3960, 4050, 4122, 4160 };
         static int sequence;
         static readonly object Gate = new object();
+        static readonly object EventGate = new object();
+        static readonly Dictionary<string, HeadsetEventMonitor> EventMonitors = new Dictionary<string, HeadsetEventMonitor>(StringComparer.OrdinalIgnoreCase);
         static bool busy;
         static int version;
         static BatteryResult lastResult = new BatteryResult { State = "starting", Message = "Инициализация…", Percent = -1 };
@@ -67,35 +71,136 @@ namespace RazerBarracudaBattery
 
         static BatteryResult Query()
         {
-            BatteryResult bluetooth = ReadBluetoothBattery();
-            if (bluetooth != null) return bluetooth;
-
             bool foundAny = false;
             bool accessDenied = false;
             List<HidInfo> candidates = Enumerate(out foundAny, out accessDenied);
             if (!foundAny)
+            {
+                StopEventMonitors();
+                BatteryResult bluetooth = ReadBluetoothBattery();
+                if (bluetooth != null) return bluetooth;
                 return new BatteryResult { State = "offline", Message = "Подключи Barracuda X по Bluetooth или через USB-донгл 2,4 ГГц. Аналоговый кабель 3,5 мм не передаёт данные о батарее.", Percent = -1 };
+            }
             if (candidates.Count == 0)
             {
+                StopEventMonitors();
+                BatteryResult bluetooth = ReadBluetoothBattery();
+                if (bluetooth != null) return bluetooth;
                 if (accessDenied)
                     return new BatteryResult { State = "access-denied", Message = "Windows запретил доступ к донглу. Закрой Synapse и попробуй запустить приложение от имени администратора.", Percent = -1 };
                 return new BatteryResult { State = "unsupported", Message = "Донгл найден, но его интерфейс не распознан. Поддерживаются Barracuda X 2022 (USB ID 1532:0550 и 1532:0552).", Percent = -1 };
             }
 
+            EnsureEventMonitors(candidates);
             string lastError = null;
             foreach (HidInfo info in candidates)
             {
                 try
                 {
                     BatteryResult result = ReadFrom(info);
-                    if (result != null) return result;
+                    if (result != null) return MergeHeadsetEvents(info, result);
                 }
                 catch (UnauthorizedAccessException ex) { accessDenied = true; lastError = ex.Message; }
                 catch (Exception ex) { lastError = ex.Message; }
             }
+            BatteryResult bluetoothFallback = ReadBluetoothBattery();
+            if (bluetoothFallback != null) return bluetoothFallback;
             if (accessDenied)
                 return new BatteryResult { State = "access-denied", Message = "Нет доступа к USB-донглу. Закрой Synapse; если не поможет, запусти приложение от имени администратора.", Percent = -1 };
             return new BatteryResult { State = "headset-off", Message = lastError == null ? "Донгл найден. Включи наушники и выбери подключение 2,4 ГГц." : "Донгл найден, но наушники не ответили. Включи их и выбери подключение 2,4 ГГц.", Percent = -1 };
+        }
+
+        static void EnsureEventMonitors(List<HidInfo> candidates)
+        {
+            HashSet<string> active = new HashSet<string>(candidates.Select(delegate(HidInfo info) { return info.Path; }), StringComparer.OrdinalIgnoreCase);
+            lock (EventGate)
+            {
+                List<string> remove = EventMonitors.Keys.Where(delegate(string path) { return !active.Contains(path); }).ToList();
+                foreach (string path in remove)
+                {
+                    EventMonitors[path].Dispose();
+                    EventMonitors.Remove(path);
+                }
+
+                foreach (HidInfo info in candidates)
+                {
+                    HeadsetEventMonitor current;
+                    if (EventMonitors.TryGetValue(info.Path, out current) && current.Running) continue;
+                    if (current != null) current.Dispose();
+                    HeadsetEventMonitor monitor = null;
+                    monitor = new HeadsetEventMonitor(info, delegate { PublishHeadsetEvents(info, monitor); });
+                    EventMonitors[info.Path] = monitor;
+                    monitor.Start();
+                }
+            }
+        }
+
+        static void StopEventMonitors()
+        {
+            lock (EventGate)
+            {
+                foreach (HeadsetEventMonitor monitor in EventMonitors.Values) monitor.Dispose();
+                EventMonitors.Clear();
+            }
+        }
+
+        static BatteryResult MergeHeadsetEvents(HidInfo info, BatteryResult result)
+        {
+            HeadsetEventMonitor monitor;
+            lock (EventGate) if (!EventMonitors.TryGetValue(info.Path, out monitor)) return result;
+            HeadsetEventMonitor.Snapshot events = monitor.Current();
+            if (!events.Percent.HasValue && !events.Charger.HasValue) return result;
+            int percent = events.Percent.HasValue ? events.Percent.Value : result.Percent;
+            bool charging = events.Charger.HasValue ? events.Charger.Value : result.Charging;
+            bool chargingKnown = events.Charger.HasValue || result.ChargingKnown;
+            bool exact = events.Percent.HasValue || result.Exact;
+            bool hasLevel = percent >= 0;
+            string message = events.Charger.HasValue
+                ? info.ProductId == YSTechPid
+                    ? (charging ? "Гарнитура сообщает о зарядке" : "Гарнитура сообщает, что не заряжается")
+                    : (charging ? "Зарядный кабель подключён" : "Зарядный кабель отключён")
+                : result.Message;
+            return new BatteryResult
+            {
+                State = charging ? "charging" : hasLevel || events.Charger.HasValue ? "online" : result.State == "charging" ? "online" : result.State,
+                Message = message,
+                Percent = percent,
+                Exact = exact,
+                Charging = charging,
+                ChargingKnown = chargingKnown,
+                Millivolts = result.Millivolts,
+                ProductId = info.ProductId
+            };
+        }
+
+        static void PublishHeadsetEvents(HidInfo info, HeadsetEventMonitor monitor)
+        {
+            HeadsetEventMonitor.Snapshot events = monitor.Current();
+            if (!events.Percent.HasValue && !events.Charger.HasValue) return;
+            lock (Gate)
+            {
+                bool sameDevice = lastResult != null && lastResult.ProductId == info.ProductId;
+                int percent = events.Percent.HasValue ? events.Percent.Value : sameDevice ? lastResult.Percent : -1;
+                bool charging = events.Charger.HasValue ? events.Charger.Value : sameDevice && lastResult.Charging;
+                bool exact = events.Percent.HasValue || sameDevice && lastResult.Exact;
+                bool chargingKnown = events.Charger.HasValue || sameDevice && lastResult.ChargingKnown;
+                string message = events.Charger.HasValue
+                    ? info.ProductId == YSTechPid
+                        ? (charging ? "Гарнитура сообщает о зарядке" : "Гарнитура сообщает, что не заряжается")
+                        : (charging ? "Зарядный кабель подключён" : "Зарядный кабель отключён")
+                    : "Уровень батареи сообщает гарнитура";
+                lastResult = new BatteryResult
+                {
+                    State = charging ? "charging" : "online",
+                    Message = message,
+                    Percent = percent,
+                    Exact = exact,
+                    Charging = charging,
+                    ChargingKnown = chargingKnown,
+                    ProductId = info.ProductId
+                };
+                version++;
+            }
         }
 
         static BatteryResult ReadBluetoothBattery()
@@ -147,7 +252,9 @@ namespace RazerBarracudaBattery
                         State = "bluetooth",
                         Message = "Bluetooth · уровень сообщает Windows" + (buffer[0] <= 20 ? " · пора зарядить" : ""),
                         Percent = buffer[0],
+                        Exact = true,
                         Charging = false,
+                        ChargingKnown = false,
                         ProductId = 0
                     };
                 }
@@ -203,39 +310,83 @@ namespace RazerBarracudaBattery
 
                 byte[] remote = Race(dev, info.ProductId, 0x0E, 0x02, 0xE1, 0x01);
                 if (remote == null || remote.Length < 13 || remote[12] != 0x00) return null;
-                List<int> samples = new List<int>();
+                int percent = -1;
+                int millivolts = -1;
+                bool exact = false;
+                bool charging = false;
+                bool chargingKnown = false;
                 try
                 {
-                    for (int i = 0; i < 7; i++)
+                    if (info.ProductId == MacronixPid)
                     {
-                        if (i > 0) Thread.Sleep(350);
-                        byte[] reply = Race(dev, info.ProductId, 0x06, 0x01, 0x00, 0x31);
-                        if (reply == null || reply.Length < 15 || reply[12] != 0x00) continue;
-                        int mv = reply[13] | (reply[14] << 8);
-                        if (mv >= 2500 && mv <= 4500) samples.Add(mv);
+                        byte[] batteryReply = ReadCustomerValue(dev, 0x21);
+                        if (batteryReply != null && batteryReply[13] <= 100)
+                        {
+                            percent = batteryReply[13];
+                            exact = true;
+                        }
+
+                        byte[] cableReply = ReadCustomerValue(dev, 0x2A);
+                        if (cableReply != null && cableReply[13] <= 1)
+                        {
+                            charging = cableReply[13] == 1;
+                            chargingKnown = true;
+                        }
+                    }
+
+                    if (percent < 0)
+                    {
+                        List<int> samples = new List<int>();
+                        for (int i = 0; i < 7; i++)
+                        {
+                            if (i > 0) Thread.Sleep(350);
+                            byte[] reply = Race(dev, info.ProductId, 0x06, 0x01, 0x00, 0x31);
+                            if (reply == null || reply.Length < 15 || reply[12] != 0x00) continue;
+                            int mv = reply[13] | (reply[14] << 8);
+                            if (mv >= 2500 && mv <= 4500) samples.Add(mv);
+                        }
+                        if (samples.Count == 0) return null;
+                        samples.Sort();
+                        int trim = samples.Count >= 5 ? 1 : 0;
+                        int low = samples[trim];
+                        int high = samples[samples.Count - 1 - trim];
+                        millivolts = low;
+                        charging = high - low >= ChargeJitterMv || low >= ChargeVoltageMv;
+                        if (!charging) percent = ToPercent(low);
                     }
                 }
                 finally
                 {
                     try { Race(dev, info.ProductId, 0x0E, 0x02, 0xE1, 0x00); } catch { }
                 }
-
-                if (samples.Count == 0) return null;
-                samples.Sort();
-                int trim = samples.Count >= 5 ? 1 : 0;
-                int low = samples[trim];
-                int high = samples[samples.Count - 1 - trim];
-                bool charging = high - low >= ChargeJitterMv || low >= ChargeVoltageMv;
+                string message = chargingKnown
+                    ? (charging ? "Кабель зарядки подключён · уровень сообщает гарнитура" : "Наушники подключены через донгл 2,4 ГГц")
+                    : charging ? "Возможна зарядка · оценка по напряжению" : exact ? "Уровень батареи сообщает гарнитура" : "Наушники подключены через донгл 2,4 ГГц";
                 return new BatteryResult
                 {
                     State = charging ? "charging" : "online",
-                    Message = charging ? "Заряжается · точный процент через донгл недоступен" : "Наушники подключены через донгл 2,4 ГГц",
-                    Percent = charging ? -1 : ToPercent(low),
+                    Message = message,
+                    Percent = percent,
+                    Exact = exact,
                     Charging = charging,
-                    Millivolts = low,
+                    ChargingKnown = chargingKnown,
+                    Millivolts = millivolts,
                     ProductId = info.ProductId
                 };
             }
+        }
+
+        static byte[] ReadCustomerValue(HidDevice dev, byte parameter)
+        {
+            byte seq = (byte)(Interlocked.Increment(ref sequence) % 127 + 1);
+            byte[] request = { 0x50, 0x41, 0x08, seq, 0x03, parameter, 0x00, 0x00 };
+            Func<byte[], bool> matches = delegate(byte[] frame)
+            {
+                return frame.Length == 14 && frame[0] == 0x50 && frame[1] == 0x49 &&
+                    frame[2] == 0x08 && frame[8] == 0x04 && frame[9] == 0x00 &&
+                    frame[10] == parameter && frame[11] == 0x01 && frame[12] == 0x01;
+            };
+            return SendMacronix(dev, request, matches);
         }
 
         static void Drain(HidDevice dev)
@@ -357,6 +508,126 @@ namespace RazerBarracudaBattery
             return 100;
         }
 
+        sealed class HeadsetEventMonitor : IDisposable
+        {
+            readonly HidInfo info;
+            readonly Action changed;
+            readonly object stateGate = new object();
+            Thread thread;
+            volatile bool stopped;
+            public volatile bool Running;
+            int? percent;
+            bool? charger;
+            bool? linked;
+
+            public struct Snapshot
+            {
+                public int? Percent;
+                public bool? Charger;
+            }
+
+            public HeadsetEventMonitor(HidInfo device, Action onChanged)
+            {
+                info = device;
+                changed = onChanged;
+            }
+
+            public void Start()
+            {
+                if (Running || stopped) return;
+                Running = true;
+                thread = new Thread(Listen);
+                thread.IsBackground = true;
+                thread.Name = "Barracuda battery events";
+                thread.Start();
+            }
+
+            void Listen()
+            {
+                try
+                {
+                    using (HidDevice dev = new HidDevice(info.Path, true))
+                    {
+                        while (!stopped)
+                        {
+                            byte[] report = dev.Read(1000);
+                            if (!stopped && report != null) Process(report);
+                        }
+                    }
+                }
+                catch { /* A later battery poll will restart this listener if the dongle reconnects. */ }
+                finally { Running = false; }
+            }
+
+            void Process(byte[] report)
+            {
+                int offset;
+                int payloadLength;
+                if (info.ProductId == YSTechPid)
+                {
+                    if (report.Length < 2 || report[0] != 0x02) return;
+                    offset = 2;
+                    payloadLength = report[1];
+                }
+                else
+                {
+                    if (report.Length < 3 || report[0] != 0x01 || report[1] != 0x80) return;
+                    offset = 3;
+                    payloadLength = report[2];
+                }
+
+                int end = Math.Min(report.Length, offset + payloadLength);
+                for (int pos = offset; pos + 10 <= end;)
+                {
+                    if (report[pos] != 0x50 || report[pos + 1] != 0x49) break;
+                    int framePayload = report[pos + 8] | (report[pos + 9] << 8);
+                    int frameLength = 10 + framePayload;
+                    if (pos + frameLength > end) break;
+                    if (framePayload >= 4 && report[pos + 2] == 0x08 &&
+                        report[pos + 8] == 0x04 && report[pos + 9] == 0x00 &&
+                        report[pos + 11] == 0x02 && report[pos + 12] == 0x01)
+                        ApplyNotification(report[pos + 10], report[pos + 13]);
+                    pos += frameLength;
+                }
+            }
+
+            void ApplyNotification(byte parameter, byte value)
+            {
+                bool changedValue = false;
+                lock (stateGate)
+                {
+                    if (parameter == 0x20 && value <= 1)
+                    {
+                        bool isLinked = value == 1;
+                        if (!linked.HasValue || linked.Value != isLinked) { linked = isLinked; changedValue = true; }
+                        if (!isLinked && charger.HasValue) { charger = null; changedValue = true; }
+                    }
+                    else if (parameter == 0x21 && value <= 100)
+                    {
+                        if (!percent.HasValue || percent.Value != value) { percent = value; changedValue = true; }
+                    }
+                    else if (parameter == 0x2A && value <= 1)
+                    {
+                        bool isCharging = value == 1;
+                        if (!charger.HasValue || charger.Value != isCharging) { charger = isCharging; changedValue = true; }
+                    }
+                }
+                if (changedValue && changed != null) changed();
+            }
+
+            public Snapshot Current()
+            {
+                lock (stateGate) return new Snapshot { Percent = percent, Charger = charger };
+            }
+
+            public void Dispose()
+            {
+                stopped = true;
+                Thread worker = thread;
+                if (worker != null && worker != Thread.CurrentThread) worker.Join(1200);
+            }
+        }
+
         sealed class HidInfo
         {
             public string Path;
@@ -426,9 +697,11 @@ namespace RazerBarracudaBattery
             readonly SafeFileHandle handle;
             readonly int inputLength;
             readonly int outputLength;
-            public HidDevice(string path)
+            public HidDevice(string path) : this(path, false) { }
+            public HidDevice(string path, bool readOnly)
             {
-                handle = CreateFile(path, 0xC0000000, 0x00000003, IntPtr.Zero, 3, 0x40000000, IntPtr.Zero);
+                uint access = readOnly ? 0x80000000 : 0xC0000000;
+                handle = CreateFile(path, access, 0x00000003, IntPtr.Zero, 3, 0x40000000, IntPtr.Zero);
                 if (handle.IsInvalid)
                 {
                     int error = Marshal.GetLastWin32Error();

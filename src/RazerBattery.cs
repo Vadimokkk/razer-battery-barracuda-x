@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Windows.Forms;
@@ -10,8 +11,8 @@ using System.Reflection;
 [assembly: AssemblyDescription("Tray battery monitor for Razer Barracuda X")]
 [assembly: AssemblyCompany("Razer Battery independent utility")]
 [assembly: AssemblyProduct("Razer Battery")]
-[assembly: AssemblyVersion("1.2.0.0")]
-[assembly: AssemblyFileVersion("1.2.0.0")]
+[assembly: AssemblyVersion("1.3.1.0")]
+[assembly: AssemblyFileVersion("1.3.1.0")]
 
 namespace RazerBatteryApp
 {
@@ -222,20 +223,22 @@ namespace RazerBatteryApp
         void ApplyReading(RazerBarracudaBattery.BatteryResult reading)
         {
             if (reading == null) return;
-            bool fresh = reading.Percent >= 0 && (reading.State == "online" || reading.State == "bluetooth");
+            bool fresh = reading.Percent >= 0 && (reading.State == "online" || reading.State == "bluetooth" || reading.State == "charging");
+            bool charging = reading.Charging || reading.State == "charging";
+            string source = reading.State == "bluetooth" ? "Bluetooth" : "USB-донгл";
             if (fresh)
             {
-                cached = new CachedReading { Percent = reading.Percent, Time = DateTime.Now, Exact = reading.State == "bluetooth" };
+                cached = new CachedReading { Percent = reading.Percent, Time = DateTime.Now, Exact = reading.Exact };
                 SaveCachedReading(cached);
-                batteryHistory.Add(reading.Percent, reading.State == "bluetooth", DateTime.UtcNow);
+                batteryHistory.Add(reading.Percent, reading.Exact, charging, source, DateTime.UtcNow);
                 if (historyWindow != null && !historyWindow.IsDisposed) historyWindow.UpdateHistory();
                 if (reading.Percent > threshold + 4) lowAlertSent = false;
-                if (alertsEnabled && reading.Percent <= threshold && !lowAlertSent)
+                if (!charging && alertsEnabled && reading.Percent <= threshold && !lowAlertSent)
                 {
                     lowAlertSent = true;
                     System.Media.SystemSounds.Exclamation.Play();
                     tray.BalloonTipTitle = "Пора подзарядить Barracuda X";
-                    tray.BalloonTipText = String.Format("Осталось {0}{1}%. Порог напоминания: {2}%.", reading.State == "online" ? "примерно " : "", reading.Percent, threshold);
+                    tray.BalloonTipText = String.Format("Осталось {0}{1}%. Порог напоминания: {2}%.", reading.Exact ? "" : "примерно ", reading.Percent, threshold);
                     tray.BalloonTipIcon = ToolTipIcon.Warning;
                     tray.ShowBalloonTip(5000);
                 }
@@ -243,11 +246,9 @@ namespace RazerBatteryApp
 
             bool stale = !fresh && cached != null;
             int displayed = fresh ? reading.Percent : stale ? cached.Percent : -1;
-            bool charging = reading.State == "charging";
             DrainEstimate estimate = null;
-            if (fresh) estimate = drainTracker.Add(reading.Percent, reading.State, DateTime.Now);
-            else drainTracker.Reset();
-            if (wasCharging && fresh && reading.Percent >= 95)
+            if (fresh && !charging) estimate = drainTracker.Add(reading.Percent, source, DateTime.Now, batteryHistory.GetRecent(6 * 60));
+            if (wasCharging && !charging && fresh && reading.Percent >= 95)
             {
                 tray.BalloonTipTitle = "Barracuda X заряжены";
                 tray.BalloonTipText = "Похоже, гарнитура набрала полный заряд. Можно отключить кабель.";
@@ -255,8 +256,8 @@ namespace RazerBatteryApp
                 tray.ShowBalloonTip(4500);
             }
             wasCharging = charging;
-            bool connected = fresh || charging;
-            bool exact = fresh ? reading.State == "bluetooth" : stale && cached != null && cached.Exact;
+            bool connected = fresh || reading.State == "charging";
+            bool exact = fresh ? reading.Exact : stale && cached != null && cached.Exact;
             SetTrayIcon(displayed, charging, !connected);
             UpdateTooltip(reading, displayed, stale, exact);
             window.SetReading(reading, cached, intervalSeconds, busyShown, estimate);
@@ -274,7 +275,8 @@ namespace RazerBatteryApp
         void UpdateTooltip(RazerBarracudaBattery.BatteryResult reading, int percent, bool stale, bool exact)
         {
             string text;
-            if (reading.State == "charging") text = "Barracuda X · заряжается";
+            if (reading.Charging || reading.State == "charging")
+                text = percent >= 0 ? String.Format("Barracuda X · ⚡ {0}{1}%{2}", exact ? "" : "~", percent, stale ? " · последний замер" : "") : "Barracuda X · ⚡ зарядка";
             else if (percent >= 0) text = String.Format("Barracuda X · {0}{1}%{2}", exact ? "" : "~", percent, stale ? " · последний замер" : "");
             else text = "Barracuda X · заряд недоступен";
             if (text.Length > 63) text = text.Substring(0, 63);
@@ -414,30 +416,57 @@ namespace RazerBatteryApp
 
     internal sealed class DrainTracker
     {
-        int startPercent = -1;
-        DateTime startTime;
-        string source;
-
-        public void Reset()
+        public DrainEstimate Add(int percent, string source, DateTime now, IList<BatterySample> history)
         {
-            startPercent = -1;
-            source = null;
-        }
-
-        public DrainEstimate Add(int percent, string connection, DateTime now)
-        {
-            if (startPercent < 0 || source != connection || percent >= startPercent + 3 || now - startTime > TimeSpan.FromHours(24))
+            if (percent <= 0 || history == null) return null;
+            DateTime cutoff = now.ToUniversalTime().AddHours(-6);
+            List<BatterySample> points = new List<BatterySample>();
+            int previous = -1;
+            bool haveExact = false;
+            foreach (BatterySample sample in history)
+                if (sample.Source == source && sample.Exact && !sample.Charging && sample.TimeUtc >= cutoff) { haveExact = true; break; }
+            foreach (BatterySample sample in history)
             {
-                startPercent = percent;
-                startTime = now;
-                source = connection;
-                return null;
+                if (sample.Source != source || sample.TimeUtc < cutoff || (haveExact && !sample.Exact)) continue;
+                if (sample.Charging)
+                {
+                    points.Clear();
+                    previous = -1;
+                    continue;
+                }
+                if (previous >= 0 && sample.Percent >= previous + 3)
+                {
+                    points.Clear();
+                    previous = -1;
+                }
+                points.Add(sample);
+                previous = sample.Percent;
             }
+            if (points.Count < 2) return null;
 
-            int drop = startPercent - percent;
-            double hours = (now - startTime).TotalHours;
-            if (drop < 2 || hours < (10.0 / 60.0) || percent <= 0) return null;
-            double rate = drop / hours;
+            BatterySample first = points[0];
+            BatterySample last = points[points.Count - 1];
+            double elapsed = (last.TimeUtc - first.TimeUtc).TotalMinutes;
+            if (elapsed < 10 || first.Percent - last.Percent < 2 || last.Percent <= 0) return null;
+
+            double meanX = 0, meanY = 0;
+            foreach (BatterySample sample in points)
+            {
+                meanX += (sample.TimeUtc - first.TimeUtc).TotalHours;
+                meanY += sample.Percent;
+            }
+            meanX /= points.Count;
+            meanY /= points.Count;
+            double numerator = 0, denominator = 0;
+            foreach (BatterySample sample in points)
+            {
+                double x = (sample.TimeUtc - first.TimeUtc).TotalHours - meanX;
+                double y = sample.Percent - meanY;
+                numerator += x * y;
+                denominator += x * x;
+            }
+            if (denominator <= 0) return null;
+            double rate = -numerator / denominator;
             if (rate < 0.15 || rate > 45) return null;
             double remaining = percent / rate;
             if (remaining <= 0 || remaining > 72) return null;
@@ -611,26 +640,38 @@ namespace RazerBatteryApp
             if (reading == null) return;
             refresh.Enabled = true;
             SetRefreshInterval(intervalSeconds);
-            bool fresh = reading.Percent >= 0 && (reading.State == "online" || reading.State == "bluetooth");
-            bool charging = reading.State == "charging";
+            bool fresh = reading.Percent >= 0 && (reading.State == "online" || reading.State == "bluetooth" || reading.State == "charging");
+            bool charging = reading.Charging || reading.State == "charging";
             if (fresh)
             {
-                bool exact = reading.State == "bluetooth";
-                gauge.SetLevel(reading.Percent, exact, false, false);
-                badgeText.Text = exact ? "BLUETOOTH" : "2,4 ГГЦ";
-                badgeText.ForeColor = green;
-                status.Text = exact ? "Bluetooth подключён" : "USB-донгл подключён";
+                gauge.SetLevel(reading.Percent, reading.Exact, false, charging);
+                badgeText.Text = charging ? "ЗАРЯДКА" : reading.State == "bluetooth" ? "BLUETOOTH" : "2,4 ГГЦ";
+                badgeText.ForeColor = charging ? Color.DeepSkyBlue : green;
+                status.Text = charging
+                    ? (reading.ProductId == 0x0550 ? "Наушники заряжаются" : reading.Percent >= 100 ? "Кабель подключён · полный заряд" : "Кабель зарядки подключён")
+                    : reading.State == "bluetooth" ? "Bluetooth подключён" : "USB-донгл подключён";
                 statusDetail.Text = reading.Message;
-                statusDetail.ForeColor = Color.FromArgb(135, 151, 179);
-                SetEstimate(estimate);
+                statusDetail.ForeColor = charging ? Color.DeepSkyBlue : Color.FromArgb(135, 151, 179);
+                if (charging)
+                {
+                    SetEstimate(null);
+                    etaValue.Text = "На зарядке";
+                    etaDetail.Text = "Оценка обновится после отключения";
+                    drainValue.Text = "Пауза";
+                    drainDetail.Text = "На зарядке расход не считаю";
+                }
+                else SetEstimate(estimate);
             }
             else if (charging)
             {
-                gauge.SetLevel(-1, false, true, false);
+                gauge.SetLevel(cached == null ? -1 : cached.Percent, cached != null && cached.Exact, cached != null, true);
                 badgeText.Text = "ЗАРЯДКА";
                 badgeText.ForeColor = Color.DeepSkyBlue;
-                status.Text = "Гарнитура заряжается";
-                statusDetail.Text = "Уровень через донгл не показывается во время зарядки";
+                status.Text = reading.ProductId == 0x0550 && reading.ChargingKnown
+                    ? "Наушники заряжаются"
+                    : reading.ChargingKnown ? "Кабель зарядки подключён" : "Возможна зарядка";
+                statusDetail.Text = reading.Message;
+                statusDetail.ForeColor = Color.DeepSkyBlue;
                 SetEstimate(null);
                 etaValue.Text = "На зарядке";
                 etaDetail.Text = "Оценка после отключения";
@@ -642,8 +683,13 @@ namespace RazerBatteryApp
                 gauge.SetLevel(cached.Percent, cached.Exact, true, false);
                 badgeText.Text = "ПОСЛЕДНИЙ ЗАМЕР";
                 badgeText.ForeColor = Color.FromArgb(158, 169, 191);
-                status.Text = "Сейчас беспроводной связи нет";
-                statusDetail.Text = "Последний замер " + AgeText(DateTime.Now - cached.Time) + " назад";
+                bool headsetLinked = reading.ProductId == 0x0550 && reading.ChargingKnown;
+                status.Text = headsetLinked
+                    ? reading.Charging ? "Гарнитура подключена · идёт зарядка" : "Гарнитура подключена · зарядки нет"
+                    : "Сейчас беспроводной связи нет";
+                statusDetail.Text = headsetLinked
+                    ? "Последний уровень " + AgeText(DateTime.Now - cached.Time) + " назад"
+                    : "Последний замер " + AgeText(DateTime.Now - cached.Time) + " назад";
                 statusDetail.ForeColor = Color.FromArgb(135, 151, 179);
                 etaValue.Text = "Нет связи";
                 etaDetail.Text = "подключись для оценки";
@@ -652,7 +698,7 @@ namespace RazerBatteryApp
             }
             else
             {
-                gauge.SetLevel(-1, false, false, true);
+                gauge.SetLevel(-1, false, false, false);
                 badgeText.Text = "НЕТ СИГНАЛА";
                 badgeText.ForeColor = Color.FromArgb(158, 169, 191);
                 status.Text = "Не вижу гарнитуру";
@@ -734,14 +780,21 @@ namespace RazerBatteryApp
                 else if (percent >= 0) g.DrawArc(active, bounds, -90, Math.Max(2, 359.8f * Math.Max(0, Math.Min(100, percent)) / 100f));
             }
 
-            string number = charging ? "⚡" : percent < 0 ? "—" : (exact ? "" : "~") + percent + "%";
+            string number = percent < 0 ? (charging ? "⚡" : "—") : (exact ? "" : "~") + percent + "%";
             Color textColor = stale ? Color.FromArgb(166, 178, 200) : charging ? Color.DeepSkyBlue : LevelColor();
-            using (Font valueFont = new Font(charging ? "Segoe UI Symbol" : "Segoe UI", charging ? 36f : 29f, FontStyle.Bold, GraphicsUnit.Point))
+            using (Font valueFont = new Font(charging && percent < 0 ? "Segoe UI Symbol" : "Segoe UI", charging && percent < 0 ? 36f : 29f, FontStyle.Bold, GraphicsUnit.Point))
             using (SolidBrush brush = new SolidBrush(textColor))
             using (StringFormat format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
                 g.DrawString(number, valueFont, brush, new RectangleF(12, 58, Width - 24, 52), format);
 
-            string caption = charging ? "ЗАРЯДКА" : stale ? "ПОСЛЕДНИЙ ЗАМЕР" : percent < 0 ? "НЕТ СИГНАЛА" : exact ? "ТОЧНО · WINDOWS" : "ОЦЕНКА · ДОНГЛ";
+            if (charging && percent >= 0)
+            {
+                using (Font boltFont = new Font("Segoe UI Symbol", 12f, FontStyle.Bold, GraphicsUnit.Point))
+                using (SolidBrush boltBrush = new SolidBrush(Color.DeepSkyBlue))
+                    g.DrawString("⚡", boltFont, boltBrush, new RectangleF(Width / 2 + 43, 67, 20, 24));
+            }
+
+            string caption = charging ? "ЗАРЯДКА ПОДКЛЮЧЕНА" : stale ? "ПОСЛЕДНИЙ ЗАМЕР" : percent < 0 ? "НЕТ СИГНАЛА" : exact ? "ТОЧНЫЙ УРОВЕНЬ" : "ОЦЕНКА · ДОНГЛ";
             using (Font captionFont = new Font("Segoe UI", 7.2f, FontStyle.Bold, GraphicsUnit.Point))
             using (SolidBrush brush = new SolidBrush(Color.FromArgb(132, 149, 178)))
             using (StringFormat format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })

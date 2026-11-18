@@ -9,7 +9,10 @@ if (-not $compiler) { throw 'Не найден компилятор C# из .NET
 $source = Join-Path $repo 'src'
 $dist = Join-Path $repo 'dist'
 New-Item -ItemType Directory -Path $dist -Force | Out-Null
-$exe = Join-Path $dist 'RazerBattery.exe'
+$versionLine = Select-String -Path (Join-Path $source 'RazerBattery.cs') -Pattern 'AssemblyFileVersion\("([0-9.]+)"\)' | Select-Object -First 1
+if (-not $versionLine) { throw 'Не удалось определить версию приложения.' }
+$version = [regex]::Match($versionLine.Line, 'AssemblyFileVersion\("([0-9.]+)"\)').Groups[1].Value -replace '\.0$', ''
+$exe = Join-Path $dist ("RazerBattery-{0}.exe" -f $version)
 $compilerArgs = @(
     '/nologo', '/target:winexe', '/platform:x64', '/optimize+',
     ('/win32manifest:' + (Join-Path $source 'RazerBattery.manifest')),
