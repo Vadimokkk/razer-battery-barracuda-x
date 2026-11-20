@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.2
+
+- Show the current charge percentage as digits in the system tray battery icon.
+- Keep the charging bolt visible beside the number and color the icon by battery level.
+
 ## 1.3.1
 
 - Read exact battery level and active charging notifications from the `1532:0550` dongle, preventing the charging-voltage jump from appearing as a battery percentage increase.

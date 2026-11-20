@@ -2,11 +2,12 @@
 
 **Индикатор заряда Razer Barracuda X для Windows.** Приложение работает в трее и не требует Razer Synapse.
 
-[Скачать готовый архив](https://github.com/Vadimokkk/razer-battery-barracuda-x/releases/latest/download/RazerBattery-Windows.zip) · [Скачать exe](https://github.com/Vadimokkk/razer-battery-barracuda-x/releases/latest/download/RazerBattery-1.3.1.exe)
+[Скачать готовый архив](https://github.com/Vadimokkk/razer-battery-barracuda-x/releases/latest/download/RazerBattery-Windows.zip) · [Скачать exe](https://github.com/Vadimokkk/razer-battery-barracuda-x/releases/latest/download/RazerBattery-1.3.2.exe)
 
 ## Возможности
 
 - Заряд в системном трее и автоматическое обновление.
+- Значок трея показывает заряд цифрами и молнию во время зарядки.
 - Подключение через USB-донгл 2,4 ГГц и Bluetooth Windows.
 - Панель с круговым индикатором, оценкой оставшегося времени и расхода.
 - История заряда за 24 часа и 7 дней. Замеры сохраняются локально до 30 дней.
@@ -36,7 +37,7 @@
 
 Сборка использует компилятор .NET Framework, поставляемый с Windows. Версионный exe и `RazerBattery-Windows.zip` появятся в `dist/`.
 
-GitHub Actions автоматически собирает архив при изменении ветки `main`. Чтобы опубликовать релиз, создай тег вида `v1.3.1` и отправь его в репозиторий: workflow соберёт exe и прикрепит архив к релизу.
+GitHub Actions автоматически собирает архив при изменении ветки `main`. Чтобы опубликовать релиз, создай тег вида `v1.3.2` и отправь его в репозиторий: workflow соберёт exe и прикрепит архив к релизу.
 
 ## Если донгл не читается
 

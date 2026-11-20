@@ -11,8 +11,8 @@ using System.Reflection;
 [assembly: AssemblyDescription("Tray battery monitor for Razer Barracuda X")]
 [assembly: AssemblyCompany("Razer Battery independent utility")]
 [assembly: AssemblyProduct("Razer Battery")]
-[assembly: AssemblyVersion("1.3.1.0")]
-[assembly: AssemblyFileVersion("1.3.1.0")]
+[assembly: AssemblyVersion("1.3.2.0")]
+[assembly: AssemblyFileVersion("1.3.2.0")]
 
 namespace RazerBatteryApp
 {
@@ -823,29 +823,30 @@ namespace RazerBatteryApp
                     graphics.SmoothingMode = SmoothingMode.AntiAlias;
                     graphics.Clear(Color.Magenta);
                     Color color = stale ? Color.Gray : charging ? Color.DeepSkyBlue : percent < 0 ? Color.Gray : percent <= 20 ? Color.IndianRed : percent <= 45 ? Color.Goldenrod : Color.MediumSeaGreen;
-                    using (Pen pen = new Pen(Color.White, 2.2f))
-                    using (SolidBrush body = new SolidBrush(Color.FromArgb(24, 34, 54)))
-                    using (SolidBrush fill = new SolidBrush(color))
+                    using (Pen pen = new Pen(color, 2f))
+                    using (SolidBrush body = new SolidBrush(Color.FromArgb(18, 26, 43)))
+                    using (SolidBrush terminal = new SolidBrush(color))
                     {
-                        graphics.FillRoundedRectangle(body, 4, 9, 23, 15, 3);
-                        graphics.DrawRoundedRectangle(pen, 4, 9, 23, 15, 3);
-                        int fillWidth = percent < 0 ? 0 : Math.Max(1, (int)Math.Round(17.0 * Math.Max(0, Math.Min(100, percent)) / 100.0));
-                        if (fillWidth > 0) graphics.FillRoundedRectangle(fill, 7, 12, fillWidth, 9, 2);
-                        graphics.FillRectangle(Brushes.White, 27, 13, 3, 7);
+                        graphics.FillRoundedRectangle(body, 2, 4, 27, 24, 4);
+                        graphics.DrawRoundedRectangle(pen, 2, 4, 27, 24, 4);
+                        graphics.FillRoundedRectangle(terminal, 28, 11, 3, 10, 1);
                     }
+
+                    string label = percent < 0 ? "—" : Math.Max(0, Math.Min(100, percent)).ToString();
+                    float labelSize = percent >= 100 ? 10f : percent >= 10 ? 14f : 16f;
+                    using (Font font = new Font("Segoe UI", labelSize, FontStyle.Bold, GraphicsUnit.Pixel))
+                    using (SolidBrush brush = new SolidBrush(Color.White))
+                    using (StringFormat format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                        graphics.DrawString(label, font, brush, new RectangleF(3, 5, 24, 20), format);
+
+                    using (Font percentFont = new Font("Segoe UI", 5.5f, FontStyle.Bold, GraphicsUnit.Pixel))
+                    using (SolidBrush percentBrush = new SolidBrush(Color.FromArgb(205, 218, 238)))
+                        graphics.DrawString("%", percentFont, percentBrush, 21.5f, 21f);
+
                     if (charging)
                     {
-                        Point[] bolt = { new Point(17, 5), new Point(13, 15), new Point(17, 15), new Point(14, 27), new Point(21, 14), new Point(17, 14) };
-                        using (SolidBrush b = new SolidBrush(Color.Yellow)) graphics.FillPolygon(b, bolt);
-                    }
-                    else if (percent >= 0)
-                    {
-                        using (Font font = new Font("Segoe UI", 7f, FontStyle.Bold, GraphicsUnit.Pixel))
-                        using (SolidBrush b = new SolidBrush(Color.White))
-                        {
-                            string label = percent <= 9 ? percent.ToString() : "";
-                            if (label.Length > 0) graphics.DrawString(label, font, b, 11f, 10f);
-                        }
+                        Point[] bolt = { new Point(27, 1), new Point(23, 6), new Point(26, 6), new Point(24, 10), new Point(30, 5), new Point(27, 5) };
+                        using (SolidBrush brush = new SolidBrush(Color.Yellow)) graphics.FillPolygon(brush, bolt);
                     }
                 }
                 bitmap.MakeTransparent(Color.Magenta);
